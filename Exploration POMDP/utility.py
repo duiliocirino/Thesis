@@ -49,8 +49,15 @@ def print_gridworld_with_policy(agent, figsize=(6, 6)):
     plt.axis('off')
     plt.show()
 
-def print_heatmap(agent, episode):
-    d_t = agent.compute_state_distribution(episode)
+def print_heatmap(agent, states):
+    '''
+    This method serves the purpose of printing a heatmap of the state distribution given a trajectory of states drawn by
+    an agent acting inside an environment.
+    :param agent: the agent that acted in the environment;
+    :param states: the states over the trajectory that has been drawn by the agent acting in the environment, these must
+        be passed in the form of a vector of probabilities of the length of the states of the underlying MDP.
+    '''
+    d_t = agent.compute_state_distribution(states)
     print(d_t)
     heatmap_data = np.zeros((agent.env.grid_size, agent.env.grid_size))
     for index in range(agent.env.state_space.n):
