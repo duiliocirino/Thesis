@@ -208,7 +208,9 @@ class REINFORCEAgentE(REINFORCEAgent):
         k = 1
         actions = [3,3,3,2]
         for i in range(self.env.observation_space.n):
-                if i % self.env.grid_size == self.env.grid_size - 1 and (k == 1):
+                if i in range(self.env.grid_size**2, self.env.grid_size**2 + self.env.length_corridor):
+                    params[i, 1] = 500
+                elif i % self.env.grid_size == self.env.grid_size - 1 and (k == 1):
                     params[i, 1] = 500
                     k += 1
                 elif i % self.env.grid_size == self.env.grid_size - 1 and (k == 3):
