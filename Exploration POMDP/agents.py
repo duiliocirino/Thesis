@@ -264,7 +264,7 @@ class REINFORCEAgentE(REINFORCEAgent):
         self.policy_params += self.alpha * grad
         return entropy
 
-    def update_multiple_sampling(self, trajectories):
+    def update_multiple_sampling(self, trajectories, baseline_coefficient=1, belief_reg_coeff=0):
         '''
         This version of the update takes into consideration the approximation of the gradient by sampling multiple trajectories. Instead
         of working with only one trajectory it works with multiple trajectories in order to have a more accurate representation of the expected
@@ -274,25 +274,31 @@ class REINFORCEAgentE(REINFORCEAgent):
          - trajectories: a list of sampled trajectories from which we compute the policy gradient.
         '''
         entropies = []
+        # Compute all entropies
+        for _, d_t in trajectories:
+            entropies.append(self.compute_entropy(d_t))
+        # Compute baseline as the average entropy
+        baseline = np.mean(entropies) * baseline_coefficient
         # Update policy parameters using the approximated gradient of the entropy objective function
         grad = np.zeros_like(self.policy_params)
-        for trajectory, d_t in trajectories:
+        for k, episode in enumerate(trajectories):
             # Initialize the gradient of the k-th sampled trajectory
             grad_k = np.zeros_like(self.policy_params)
             # Compute entropy
-            entropy = self.compute_entropy(d_t)
+            entropy = entropies[k]
+            # Compute advantage
+            advantage = entropy - baseline
             # Compute the gradient
+            trajectory = episode[0]
             for t in range(len(trajectory)):
                 state, action, probs, _, _ = trajectory[t]
                 # Compute the policy gradient
                 dlogp = np.zeros(self.env.action_space.n)
                 for i in range(self.env.action_space.n):
                     dlogp[i] = 1.0 - probs[i] if i == action else -probs[i]
-                grad_k += np.outer(state, dlogp) * entropy
+                grad_k += np.outer(state, dlogp) * advantage
             # Sum the k-th gradient to the final gradient
             grad += grad_k
-            # Save in entropies
-            entropies.append(entropy)
         # Divide the gradient by the number of trajectories sampled
         grad /= len(trajectories)
         # Update the policy parameters
@@ -323,7 +329,7 @@ class REINFORCEAgentE(REINFORCEAgent):
                 # Sample the action from the state
                 action, probs = self.get_action(ohe_state)
                 # Compute the step
-                next_state, reward, done, _ = env.step(action)
+                next_state, reward, done, _, _ = env.step(action)
                 episode.append((ohe_state, action, probs, reward, next_state))
                 state = next_state
             d_t /= len(episode)
@@ -347,7 +353,7 @@ class REINFORCEAgentE(REINFORCEAgent):
                     # Sample the action from the state
                     action, probs = self.get_action(ohe_state)
                     # Compute the step
-                    next_state, reward, done, _ = env.step(action)
+                    next_state, reward, done, _, _ = env.step(action)
                     episode.append((ohe_state, action, probs, reward, next_state))
                     # Update state
                     state = next_state
@@ -356,6 +362,11 @@ class REINFORCEAgentE(REINFORCEAgent):
             return episodes
         
     def print_visuals(self, env, n_traj):
+        num_rows = 1  # Number of rows in the grid
+        num_cols = 2  # Number of columns in the grid
+        # Create a larger figure with subplots
+        fig, axes = plt.subplots(num_rows, num_cols, figsize=(16, 8))
+        plt.subplots_adjust(wspace=0.5, hspace=0.5)
         # Visualization of policy and expected state visitation
         d_t = np.zeros(env.observation_space.n)
         for _ in range(n_traj):
@@ -370,15 +381,17 @@ class REINFORCEAgentE(REINFORCEAgent):
                 # Sample the action from the state
                 action, _ = self.get_action(ohe_state)
                 # Compute the step
-                next_state, _, done, _ = env.step(action)
+                next_state, _, done, _, _ = env.step(action)
                 # Update state
                 state = next_state
         # Normalize the state visitation
         d_t /= (env.time_horizon * n_traj)
-        # Print the final true state heatmap
-        print_heatmap(self, d_t, "Final State Distribution")
-        # Print the ending policy
-        print_gridworld_with_policy(self, env, title="Ending Policy")
+        # Plot the final state heatmap
+        print_heatmap(self, d_t, "Final State Distribution", ax=axes[0])
+        # Plot the ending policy
+        print_gridworld_with_policy(self, env, title="Ending Policy", ax=axes[1])
+        # Use plt.show() once at the end to display the entire combined visualization
+        plt.show()
 
 
 ## REWARD POMDP ##
