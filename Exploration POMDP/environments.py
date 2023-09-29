@@ -22,17 +22,22 @@ class GridworldEnv(gym.Env):
     - grid_size: the size in height and length of the grid, N of the NxN matrix.
     - time_horizon: the maximum number of time steps the agent can take to get to the goal. If set to -1 the time horizon is ∞.
     - prob: the probability with which the environment takes the chosen action. If set to 0 the actions taken by the agent are deterministic.
-    
+    - randomize: a variable that if at 1 sets a random initial position, at 0 makes the initial position the top left corner.
+    - length_corridor: the length of a corridor placed on the right bottom corner of the environment.
+    - goggles: a 0-1 value that states whether to give the environment a pair of glasses that the agent receives by going on a state, which
+        improves the quality of the observations.
     """
     
-    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0):
+    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, goggles=False):
         self.grid_size = grid_size
         self.length_corridor = length_corridor
-        self.observation_space = spaces.Discrete(self.grid_size ** 2 + self.length_corridor)
+        self.goggles = goggles
+        self.observation_space = spaces.Discrete((self.grid_size ** 2 + self.length_corridor)*(1 + self.goggles))
         self.action_space = spaces.Discrete(4)
         self.reward_range = (-0.1, 1.0)
         self.observation_range = np.array(range(self.observation_space.n))
         self.goal = (grid_size-1, grid_size-1)
+        self.goggles_pos = (0, grid_size-1)
         self.done = False
         self.time_horizon = time_horizon
         self.steps_taken = 0
@@ -48,23 +53,22 @@ class GridworldEnv(gym.Env):
         '''
         This method builds the transition matrix for the MDP, T(s'|a, s).
         The function should be used with the following order of operands:
-         - first parameter: s', the state where the agent takes the action in
-         - second parameter: s, the state where the agent arrives taking action a from state s
+         - first parameter: s, the state where the agent takes the action in
+         - second parameter: s', the state where the agent arrives taking action a from state s
          - third parameter: a, the action taken by the agent
         '''
         transition_matrix = np.zeros((self.observation_space.n, self.observation_space.n, self.action_space.n))
         # For every state (i,j)
-        for i in range(self.grid_size):
-            for j in range(self.grid_size):
-                s = (i, j)
-                # For every action 'a' chosen as action from the agent
-                for a in range(self.action_space.n):
-                    # For all actions 'a_'
-                    for a_ in range(self.action_space.n):
-                        # Calculate the probability of 
-                        prob = 1 - self.prob if a_ == a else self.prob / (self.action_space.n - 1)
-                        s_ = self._sample_new_position(a_, s)
-                        transition_matrix[self.state_to_index(s_), self.state_to_index(s), a] += prob
+        for index in self.observation_range:
+            s = self.index_to_state(index)
+            # For every action 'a' chosen as action from the agent
+            for a in range(self.action_space.n):
+                # For all actions 'a_'
+                for a_ in range(self.action_space.n):
+                    # Calculate the probability of
+                    prob = 1 - self.prob if a_ == a else self.prob / (self.action_space.n - 1)
+                    s_ = self._sample_new_position(a_, s)
+                    transition_matrix[self.state_to_index(s_), self.state_to_index(s), a] += prob
         return transition_matrix
     
     def _sample_new_position(self, action, state):
@@ -96,12 +100,16 @@ class GridworldEnv(gym.Env):
         return {"coord": self.current_pos}
     
     def state_to_index(self, state):
+        index = 0
         if state[1] >= self.grid_size:
-            return self.grid_size ** 2 + state[1] - self.grid_size
-        return state[0] + state[1] * self.grid_size
+            index = self.grid_size ** 2 + state[1] - self.grid_size
+        else:
+            index = state[0] + state[1] * self.grid_size
+        return index * (1 + self.goggles_on)
 
     def index_to_state(self, index):
         """Converts an index to a state tuple (i, j)."""
+        index /= (1 + self.goggles_on)
         if index >= self.grid_size ** 2:
             i = self.grid_size - 1
             j = self.grid_size + index - self.grid_size ** 2
@@ -129,18 +137,21 @@ class GridworldEnv(gym.Env):
         if new_pos == self.goal:
             reward = 1.0
             self.done = True
+        if new_pos == self.googles_pos and self.goggles:
+            self.goggles_on = True
         self.current_pos = new_pos
         self.steps_taken += 1
         if self.time_horizon != -1 and self.steps_taken >= self.time_horizon:
             self.done = True
         info = self._get_info
-        return self.state_to_index(self.current_pos), reward, self.done, info
+        return self.state_to_index(self.current_pos), reward, self.done, False, info
     
     def reset(self, seed=None, options=None):
         if self.randomize == 1:
             self.current_pos = self.index_to_state(np.random.randint(0, self.observation_space.n))
         else:
             self.current_pos = (0, 0)
+        self.goggles_on = False
         self.done = False
         self.steps_taken = 0
         info = {}
@@ -176,7 +187,7 @@ class GridworldEnvGoalless(GridworldEnv):
         if self.time_horizon != -1 and self.steps_taken >= self.time_horizon:
             self.done = True
         info = {}
-        return self.state_to_index(self.current_pos), reward, self.done, info
+        return self.state_to_index(self.current_pos), reward, self.done, False, info
 
 
 ## POMDP ##
@@ -199,7 +210,6 @@ class GridworldPOMDPEnv(GridworldEnv):
         # Initialize the underlying Gridworld MDP
         super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, randomize=randomize, prob=prob)
         # Initialize all the POMDP specific variables
-        self.observation_space = spaces.Discrete(self.grid_size**2 + self.length_corridor)
         self.steepness = steepness
         self.uniform = uniform
         self.observation_matrix = self.build_observation_matrix()
@@ -271,7 +281,6 @@ class GridworldPOMDPEnvGoalless(GridworldEnvGoalless):
         # Initialize the underlying Gridworld MDP
         super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, prob=prob, randomize=randomize)
         # Initialize all the POMDP specific variables
-        self.observation_space = spaces.Discrete(self.grid_size**2 + self.length_corridor)
         self.steepness = steepness
         self.uniform = uniform
         self.observation_matrix = self.build_observation_matrix()
@@ -323,7 +332,7 @@ class GridworldPOMDPEnvGoalless(GridworldEnvGoalless):
         # Save the true state
         true_state = self._get_info()
         # Make the step of the underlying MDP
-        next_state, reward, done, info = super().step(action)
+        next_state, reward, done, _, info = super().step(action)
         # Get the observation probabilities for the state
         obs_prob = self.observation_matrix[next_state]
         # Sample the next observation from the probabilities
@@ -353,12 +362,11 @@ class GridworldPOMDPEnvBiModal(GridworldEnvGoalless):
        1-uniform
      - shift_amount: a number that represents how much to shift the gaussian from the mean.
     '''
-    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=3, steepness=15, uniform=0, shift_amount=0.80):
+    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, steepness=15, uniform=0, shift_amount=0.80):
         # Initialize the underlying Gridworld MDP
         super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, randomize=randomize, prob=prob)
         # Initialize all the POMDP specific variables
         self.shift_amount = shift_amount
-        self.observation_space = spaces.Discrete(self.grid_size ** 2 + self.length_corridor)
         self.steepness = steepness
         self.uniform = uniform
         self.observation_matrix = self.build_observation_matrix()
@@ -409,7 +417,7 @@ class GridworldPOMDPEnvBiModal(GridworldEnvGoalless):
         # Save the true state
         true_state = self._get_info()
         # Make the step of the underlying MDP
-        next_state, reward, done, info = super().step(action)
+        next_state, reward, done, _, info = super().step(action)
         # Get the observation probabilities for the state
         obs_prob = self.observation_matrix[next_state]
         # Sample the next observation from the probabilities
@@ -495,7 +503,7 @@ class GridworldPOMDPEnvAsymm(GridworldEnvGoalless):
         # Save the true state
         true_state = self._get_info()
         # Make the step of the underlying MDP
-        next_state, reward, done, info = super().step(action)
+        next_state, reward, done, _, info = super().step(action)
         # Get the observation probabilities for the state
         obs_prob = self.observation_matrix[next_state]
         # Sample the next observation from the probabilities
