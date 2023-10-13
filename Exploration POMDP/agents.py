@@ -264,7 +264,7 @@ class REINFORCEAgentE(REINFORCEAgent):
         self.policy_params += self.alpha * grad
         return entropy
 
-    def update_multiple_sampling(self, trajectories, baseline_coefficient=1, belief_reg_coeff=0):
+    def update_multiple_sampling(self, trajectories, baseline_coefficient=1, belief_reg=0):
         '''
         This version of the update takes into consideration the approximation of the gradient by sampling multiple trajectories. Instead
         of working with only one trajectory it works with multiple trajectories in order to have a more accurate representation of the expected
@@ -274,9 +274,22 @@ class REINFORCEAgentE(REINFORCEAgent):
          - trajectories: a list of sampled trajectories from which we compute the policy gradient.
         '''
         entropies = []
+        belief_entropies = []
         # Compute all entropies
-        for _, d_t in trajectories:
+        for episode, d_t in trajectories:
+            step_beliefs = [step[0] for step in episode]
+            for belief in step_beliefs:
+                belief_entropies.append(self.compute_entropy(belief))
+            # Handle goggles
+            if self.env.goggles == True:
+                d_t = d_t[:self.env.n_states] + d_t[self.env.n_states:]
             entropies.append(self.compute_entropy(d_t))
+        sum_entropies_belief = (np.sum(belief_entropies) / len(trajectories))
+        # Compute bound
+        bound = (np.log(self.env.observation_space.n) / np.log(self.env.observation_space.n - 1) * sum_entropies_belief -
+                 np.log(self.env.observation_space.n) * np.sqrt(np.log(2 / 0.95) / (2*len(trajectories))))
+        # Entropies with belief regularization
+        reg_entropies = entropies - belief_reg * bound
         # Compute baseline as the average entropy
         baseline = np.mean(entropies) * baseline_coefficient
         # Update policy parameters using the approximated gradient of the entropy objective function
@@ -285,7 +298,7 @@ class REINFORCEAgentE(REINFORCEAgent):
             # Initialize the gradient of the k-th sampled trajectory
             grad_k = np.zeros_like(self.policy_params)
             # Compute entropy
-            entropy = entropies[k]
+            entropy = reg_entropies[k]
             # Compute advantage
             advantage = entropy - baseline
             # Compute the gradient
@@ -303,7 +316,7 @@ class REINFORCEAgentE(REINFORCEAgent):
         grad /= len(trajectories)
         # Update the policy parameters
         self.policy_params += self.alpha * grad
-        return entropies
+        return entropies, bound
 
     def play(self, env, n_traj=1):
         '''
@@ -529,8 +542,6 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
     def play(self, env, n_traj):
         # Initialize episodes array
         episodes = []
-        # Initialize entropies arrays
-        entropies = []
         true_entropies = []
         for k in range(n_traj):
             # Initialize episode array
@@ -539,9 +550,15 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
             d_t = np.zeros(env.observation_space.n)
             true_d_t = np.zeros(env.observation_space.n)
             # Initialize the belief states
-            self.belief_state = np.ones(env.observation_space.n) / env.observation_space.n
+            self.belief_state = np.zeros(env.observation_space.n)
+            if env.goggles == True:
+                belief = np.ones(env.n_states) / env.n_states
+                self.belief_state = np.concatenate((belief, self.belief_state[belief.size:]))
+            else:
+                self.belief_state = np.ones(env.observation_space.n) / env.observation_space.n
             # Reset the environment
             env.reset()
+            goggles = False
             done = False
             while not done:
                 # Sample action and get probabilities from the belief
@@ -556,25 +573,20 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
                 true_state_index = true_state['true_state']
                 # Update state visitation
                 d_t[state_index] += 1
-                # Update state visitation
+                # Update true state visitation
                 true_d_t[true_state_index] += 1
                 episode.append((self.belief_state, action, probs, reward, true_state))
+                # Update belief
                 self.belief_update(action, next_obs)
             # Compute true entropy of the trajectory
             true_d_t /= len(episode)
             true_entropies.append(self.compute_entropy(true_d_t))
             # Compute believed entropy
             d_t /= len(episode)
-            
             episodes.append((episode, d_t))
         return episodes, true_entropies
 
     def print_visuals(self, env, n_traj):
-        num_rows = 2  # Number of rows in the grid
-        num_cols = 3  # Number of columns in the grid
-        # Create a larger figure with subplots
-        fig, axes = plt.subplots(num_rows, num_cols, figsize=(20, 12))
-        plt.subplots_adjust(wspace=0.5, hspace=0.5)
         # Visualization of policy and expected state visitation
         d_t = np.zeros(env.observation_space.n)
         true_d_t = np.zeros(env.observation_space.n)
@@ -603,20 +615,44 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
         # Normalize the state visitations
         true_d_t /= (env.time_horizon * n_traj)
         d_t /= (env.time_horizon * n_traj)
-        # Plot the final true state heatmap
-        print_heatmap(self, true_d_t, "Final True State Distribution", ax=axes[0, 0])
-        # Plot the final believed state heatmap
-        print_heatmap(self, d_t, "Final Believed State Distribution", ax=axes[0, 1])
-        # Plot KL divergence between d_t and true d_t
-        kl_divergence1 = entropy(d_t, true_d_t)
-        axes[0, 2].text(0.5, 0.5, f"KL divergence(d_t, true_d_t):\n{kl_divergence1:.4f}", ha='center', va='center')
-        axes[0, 2].axis('off')
-        # Plot KL divergence between true_d_t and d_t
-        kl_divergence2 = entropy(true_d_t, d_t)
-        axes[1, 0].text(0.5, 0.5, f"KL divergence(true_d_t, d_t):\n{kl_divergence2:.4f}", ha='center', va='center')
-        axes[1, 0].axis('off')
-        # Plot the ending policy
-        print_gridworld_with_policy(self, env, title="Ending Policy", ax=axes[1, 1])
+        if self.env.goggles == False:
+            num_rows = 2  # Number of rows in the grid
+            num_cols = 2  # Number of columns in the grid
+            # Create a larger figure with subplots
+            fig, axes = plt.subplots(num_rows, num_cols, figsize=(12, 12))
+            plt.subplots_adjust(wspace=0.5, hspace=0.5)
+            # Plot the final true state heatmap
+            print_heatmap(self, true_d_t, "Final True State Distribution", ax=axes[0, 0])
+            # Plot the final believed state heatmap
+            print_heatmap(self, d_t, "Final Believed State Distribution", ax=axes[0, 1])
+            # Plot KL divergences
+            kl_divergence1 = entropy(d_t, true_d_t)
+            kl_divergence2 = entropy(true_d_t, d_t)
+            axes[1, 0].text(0.5, 0.5, f"KL divergence(d_t, true_d_t):\n{kl_divergence1:.4f}\nKL divergence(true_d_t, d_t):\n{kl_divergence2:.4f}", ha='center', va='center')
+            axes[1, 0].axis('off')
+            # Plot the ending policy
+            print_gridworld_with_policy(self.policy_params, env, title="Ending Policy", ax=axes[1, 1])
+        else:
+            num_rows = 2  # Number of rows in the grid
+            num_cols = 3  # Number of columns in the grid
+            # Create a larger figure with subplots
+            fig, axes = plt.subplots(num_rows, num_cols, figsize=(20, 12))
+            plt.subplots_adjust(wspace=0.5, hspace=0.5)
+            # Adapt the state visitations
+            d_t = d_t[:int(env.observation_space.n/2)] + d_t[int(env.observation_space.n/2):]
+            true_d_t = true_d_t[:int(env.observation_space.n/2)] + true_d_t[int(env.observation_space.n/2):]
+            # Plot the final true state heatmap
+            print_heatmap(self, true_d_t, "Final True State Distribution", ax=axes[0, 0])
+            # Plot the final believed state heatmap
+            print_heatmap(self, d_t, "Final Believed State Distribution", ax=axes[0, 1])
+            # Plot KL divergences
+            kl_divergence1 = entropy(d_t, true_d_t)
+            kl_divergence2 = entropy(true_d_t, d_t)
+            axes[0, 2].text(0.5, 0.5, f"KL divergence(d_t, true_d_t):\n{kl_divergence1:.4f}\nKL divergence(true_d_t, d_t):\n{kl_divergence2:.4f}", ha='center', va='center')
+            axes[0, 2].axis('off')
+            # Plot the ending policy
+            print_gridworld_with_policy(self.policy_params[:int(env.observation_space.n/2), :], env, title="Ending Policy no goggles", ax=axes[1, 1])
+            print_gridworld_with_policy(self.policy_params[int(env.observation_space.n/2):, :], env, title="Ending Policy goggles on", ax=axes[1, 2])
         # Use plt.show() once at the end to display the entire combined visualization
         plt.show()
 
@@ -742,6 +778,224 @@ class REINFORCEAgentEPOMDPVec(REINFORCEAgentE):
         # Use plt.show() once at the end to display the entire combined visualization
         plt.show()
 
+
+## DOUBLE INPUT POLICY
+
+
+class REINFORCEDoubleAgentE(REINFORCEAgentEPOMDP):
+    '''
+    This class is the implementation of a REINFORCE agent that tries to maximize the objective function J(θ)=E_(τ ~ p_π)[R(τ)]
+
+    Args:
+     - env: a copy of the environment on which the agent is acting.
+     - alpha: the value of the learning rate to compute the policy update.
+     - gamma: the value of the discount for the reward in order to compute the discounted reward.
+    '''
+    def __init__(self, env, alpha=0.1, gamma=0.9):
+        super().__init__(env=env, alpha=alpha, gamma=gamma)
+        # Policy of the agent
+        self.policy_params = np.zeros((env.observation_space.n, env.observation_space.n, env.action_space.n))
+
+    def get_probability(self, history, state):
+        '''
+        This method is used to get the action probabilities from the policy given a state.
+
+        Args:
+         - state: an array representing the state from which we take an action. Sums up to 1, being a probability distribution over the states.
+        '''
+        # Compute the first multiplication between the mean vector and the 3D policy
+        first_prod = np.dot(history, self.policy_params)
+        # Compute the dot product
+        params = np.dot(state, first_prod)
+        # Compute the softmax
+        probs = np.exp(params) / np.sum(np.exp(params))
+        return probs
+    
+    def get_action(self, history, state):
+        '''
+        This method is used to get the action the agent will given a certain state.
+
+        Args:
+         - state: an array representing the state from which we take an action. Sums up to 1, being a probability distribution over the states.
+        '''
+        # Get probability vector
+        probs = self.get_probability(history, state)
+        # Sample the action
+        action = random.choices(range(len(probs)), weights=probs)[0]
+        #action = np.random.choice(len(probs), p=probs)
+        return action, probs
+
+    def update_multiple_sampling(self, trajectories, baseline_coefficient=1, belief_reg=0):
+        '''
+        This version of the update takes into consideration the approximation of the gradient by sampling multiple trajectories. Instead
+        of working with only one trajectory it works with multiple trajectories in order to have a more accurate representation of the expected
+        value of the ∇J(θ).
+
+        Args:
+         - trajectories: a list of sampled trajectories from which we compute the policy gradient.
+        '''
+        entropies = []
+        belief_entropies = []
+        # Compute all entropies
+        for episode, d_t in trajectories:
+            step_beliefs = [step[0] for step in episode]
+            for belief in step_beliefs:
+                belief_entropies.append(self.compute_entropy(belief))
+            # Handle goggles
+            if self.env.goggles == True:
+                d_t = d_t[:self.env.n_states] + d_t[self.env.n_states:]
+            entropies.append(self.compute_entropy(d_t))
+        sum_entropies_belief = (np.sum(belief_entropies) / len(trajectories))
+        # Compute bound
+        bound = (np.log(self.env.observation_space.n) / np.log(self.env.observation_space.n - 1) * sum_entropies_belief -
+                 np.log(self.env.observation_space.n) * np.sqrt(np.log(2 / 0.95) / (2*len(trajectories))))
+        # Compute baseline as the average entropy
+        baseline = np.mean(entropies) * baseline_coefficient
+        # Update policy parameters using the approximated gradient of the entropy objective function
+        grad = np.zeros_like(self.policy_params)
+        for k, episode in enumerate(trajectories):
+            # Initialize the gradient of the k-th sampled trajectory
+            grad_k = np.zeros_like(self.policy_params)
+            # Compute entropy
+            entropy = entropies[k]
+            # Compute advantage
+            advantage = entropy - baseline
+            # Compute the gradient
+            trajectory = episode[0]
+            for t in range(len(trajectory)):
+                state, visits, action, probs, _, _ = trajectory[t]
+                # Compute the policy gradient
+                dlogp = np.zeros(self.env.action_space.n)
+                for i in range(self.env.action_space.n):
+                    dlogp[i] = 1.0 - probs[i] if i == action else -probs[i]
+                first_prod = np.outer(state, dlogp)
+                grad_k += np.outer(visits, first_prod) * (advantage - belief_reg * bound)
+            # Sum the k-th gradient to the final gradient
+            grad += grad_k
+        # Divide the gradient by the number of trajectories sampled
+        grad /= len(trajectories)
+        # Update the policy parameters
+        self.policy_params += self.alpha * grad
+        return entropies, bound
+
+    def play(self, env, n_traj):
+        # Initialize episodes array
+        episodes = []
+        true_entropies = []
+        for k in range(n_traj):
+            # Initialize episode array
+            episode = []
+            # Initialize the state visitations arrays
+            d_t = np.zeros(env.observation_space.n)
+            true_d_t = np.zeros(env.observation_space.n)
+            # Initialize the belief states
+            self.belief_state = np.ones(env.observation_space.n) / env.observation_space.n
+            # Reset the environment
+            env.reset()
+            goggles = False
+            done = False
+            while not done:
+                # Sample action and get probabilities from the belief
+                action, probs = self.get_action(self.belief_state)
+                # Sample state
+                sampled_state = self.get_state(self.belief_state, 1)
+                # Get the index of the state
+                state_index = self.env.state_to_index(sampled_state)
+                # Take a step of the environment
+                next_obs, reward, done, _ ,true_state = env.step(action)
+                # Get true_state from dict
+                true_state_index = true_state['true_state']
+                # Update state visitation
+                d_t[state_index] += 1
+                # Update state visitation
+                true_d_t[true_state_index] += 1
+                episode.append((self.belief_state, d_t/np.sum(d_t), action, probs, reward, true_state))
+                # Change belief if goggles are put on
+                if goggles == False and env.goggles_on == True:
+                    goggles = True
+                    self.belief_state = self.ohe_states[true_state_index]
+                    # print("goggle on at step " + str(len(episode)))
+                else:
+                    self.belief_update(action, next_obs)
+            # Compute true entropy of the trajectory
+            true_d_t /= len(episode)
+            true_entropies.append(self.compute_entropy(true_d_t))
+            # Compute believed entropy
+            d_t /= len(episode)
+            
+            episodes.append((episode, d_t))
+        return episodes, true_entropies
+
+    def print_visuals(self, env, n_traj):
+        # Visualization of policy and expected state visitation
+        d_t = np.zeros(env.observation_space.n)
+        true_d_t = np.zeros(env.observation_space.n)
+        for i in range(n_traj):
+            # Initialize the belief states
+            self.belief_state = np.ones(env.observation_space.n) / env.observation_space.n
+            # Reset the environment
+            env.reset()
+            done = False
+            while not done:
+                # Sample action and get probabilities from the belief
+                action, _ = self.get_action(self.belief_state)
+                # Sample state
+                sampled_state = self.get_state(self.belief_state, 1)
+                # Get the index of the state
+                state_index = self.env.state_to_index(sampled_state)
+                # Take a step of the environment
+                next_obs, _, done, _, true_state = env.step(action)
+                # Get true_state from dict
+                true_state_index = true_state['true_state']
+                # Update state visitation
+                d_t[state_index] += 1
+                # Update state visitation
+                true_d_t[true_state_index] += 1
+                self.belief_update(action, next_obs)
+        # Normalize the state visitations
+        true_d_t /= (env.time_horizon * n_traj)
+        d_t /= (env.time_horizon * n_traj)
+        if self.env.goggles == False:
+            num_rows = 2  # Number of rows in the grid
+            num_cols = 2  # Number of columns in the grid
+            # Create a larger figure with subplots
+            fig, axes = plt.subplots(num_rows, num_cols, figsize=(12, 12))
+            plt.subplots_adjust(wspace=0.5, hspace=0.5)
+            # Plot the final true state heatmap
+            print_heatmap(self, true_d_t, "Final True State Distribution", ax=axes[0, 0])
+            # Plot the final believed state heatmap
+            print_heatmap(self, d_t, "Final Believed State Distribution", ax=axes[0, 1])
+            # Plot KL divergences
+            kl_divergence1 = entropy(d_t, true_d_t)
+            kl_divergence2 = entropy(true_d_t, d_t)
+            axes[1, 0].text(0.5, 0.5, f"KL divergence(d_t, true_d_t):\n{kl_divergence1:.4f}\nKL divergence(true_d_t, d_t):\n{kl_divergence2:.4f}", ha='center', va='center')
+            axes[1, 0].axis('off')
+            # Plot the ending policy
+            print_gridworld_with_policy(self, env, title="Ending Policy", ax=axes[1, 1])
+        else:
+            num_rows = 2  # Number of rows in the grid
+            num_cols = 3  # Number of columns in the grid
+            # Create a larger figure with subplots
+            fig, axes = plt.subplots(num_rows, num_cols, figsize=(20, 12))
+            plt.subplots_adjust(wspace=0.5, hspace=0.5)
+            # Adapt the state visitations
+            d_t = d_t[:int(env.observation_space.n/2)] + d_t[int(env.observation_space.n/2):]
+            true_d_t = true_d_t[:int(env.observation_space.n/2)] + true_d_t[int(env.observation_space.n/2):]
+            # Plot the final true state heatmap
+            print_heatmap(self, true_d_t, "Final True State Distribution", ax=axes[0, 0])
+            # Plot the final believed state heatmap
+            print_heatmap(self, d_t, "Final Believed State Distribution", ax=axes[0, 1])
+            # Plot KL divergences
+            kl_divergence1 = entropy(d_t, true_d_t)
+            kl_divergence2 = entropy(true_d_t, d_t)
+            axes[0, 2].text(0.5, 0.5, f"KL divergence(d_t, true_d_t):\n{kl_divergence1:.4f}\nKL divergence(true_d_t, d_t):\n{kl_divergence2:.4f}", ha='center', va='center')
+            axes[0, 2].axis('off')
+            # Plot the ending policy
+            print_gridworld_with_policy(self.policy_params[:int(env.observation_space.n/2), :], env, title="Ending Policy no goggles", ax=axes[1, 1])
+            print_gridworld_with_policy(self.policy_params[int(env.observation_space.n/2):, :], env, title="Ending Policy goggles on", ax=axes[1, 2])
+        # Use plt.show() once at the end to display the entire combined visualization
+        plt.show()
+        
 
 ## DEEP PART
 

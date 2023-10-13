@@ -38,6 +38,8 @@ class GridworldEnv(gym.Env):
         self.observation_range = np.array(range(self.observation_space.n))
         self.goal = (grid_size-1, grid_size-1)
         self.goggles_pos = (0, grid_size-1)
+        self.n_states = int(self.observation_space.n / 2) if goggles else self.observation_space.n
+        self.goggles_on = False
         self.done = False
         self.time_horizon = time_horizon
         self.steps_taken = 0
@@ -60,6 +62,9 @@ class GridworldEnv(gym.Env):
         transition_matrix = np.zeros((self.observation_space.n, self.observation_space.n, self.action_space.n))
         # For every state (i,j)
         for index in self.observation_range:
+            # Handle goggles
+            if self.goggles==True and index >= self.n_states:
+                self.goggles_on = True
             s = self.index_to_state(index)
             # For every action 'a' chosen as action from the agent
             for a in range(self.action_space.n):
@@ -68,7 +73,11 @@ class GridworldEnv(gym.Env):
                     # Calculate the probability of
                     prob = 1 - self.prob if a_ == a else self.prob / (self.action_space.n - 1)
                     s_ = self._sample_new_position(a_, s)
-                    transition_matrix[self.state_to_index(s_), self.state_to_index(s), a] += prob
+                    if s_==self.goggles_pos and self.goggles_on == False and self.goggles:
+                        transition_matrix[self.state_to_index(s_) + self.n_states, self.state_to_index(s), a] += prob
+                    else:
+                        transition_matrix[self.state_to_index(s_), self.state_to_index(s), a] += prob
+        self.goggles_on = False
         return transition_matrix
     
     def _sample_new_position(self, action, state):
@@ -105,17 +114,17 @@ class GridworldEnv(gym.Env):
             index = self.grid_size ** 2 + state[1] - self.grid_size
         else:
             index = state[0] + state[1] * self.grid_size
-        return index * (1 + self.goggles_on)
+        return int(index + self.n_states * self.goggles_on)
 
     def index_to_state(self, index):
         """Converts an index to a state tuple (i, j)."""
-        index /= (1 + self.goggles_on)
-        if index >= self.grid_size ** 2:
+        ind = int(index - (self.n_states * self.goggles_on))
+        if ind >= self.grid_size ** 2:
             i = self.grid_size - 1
-            j = self.grid_size + index - self.grid_size ** 2
+            j = self.grid_size + ind - self.grid_size ** 2
             return (i, j)
-        i = index % self.grid_size
-        j = index // self.grid_size
+        i = ind % self.grid_size
+        j = ind // self.grid_size
         #print("Converting %d => (%d, %d)" %(index, i, j))
         return (i, j)
     
@@ -125,6 +134,9 @@ class GridworldEnv(gym.Env):
         next_state_index = random.choices(self.observation_range, weights=action_probabilities)[0]
         #next_state_index = np.random.choice(self.observation_space.n, p=action_probabilities)
         next_pos = self.index_to_state(next_state_index)
+        # TODO: This could generate problems with a small environment
+        if self.goggles and next_pos[1] > self.grid_size + self.length_corridor:
+            next_pos = self.goggles_pos
         #print("Taking action %d from cur_pos index:%d (%d, %d): going to index %d which is state => (%d, %d)" %(action, current_state, self.current_pos[0], self.current_pos[1], next_state_index, next_pos[0], next_pos[1]))
         return next_pos
         
@@ -137,7 +149,7 @@ class GridworldEnv(gym.Env):
         if new_pos == self.goal:
             reward = 1.0
             self.done = True
-        if new_pos == self.googles_pos and self.goggles:
+        if new_pos == self.goggles_pos and self.goggles == True:
             self.goggles_on = True
         self.current_pos = new_pos
         self.steps_taken += 1
@@ -182,6 +194,10 @@ class GridworldEnvGoalless(GridworldEnv):
         reward = -0.1  # default reward for moving
         if new_pos == self.goal:
             reward = 1.0
+        if new_pos == self.goggles_pos and self.goggles == True:
+            self.goggles_on = True
+        if new_pos == self.goggles_pos and self.goggles == True:
+            self.goggles_on = True
         self.current_pos = new_pos
         self.steps_taken += 1
         if self.time_horizon != -1 and self.steps_taken >= self.time_horizon:
@@ -206,9 +222,9 @@ class GridworldPOMDPEnv(GridworldEnv):
      - uniform: a variable that must be between 0 and 1 that, when greater than 0, makes the observation matrix be uniformly distributed but in the true state, where it has probability
        1-uniform
     '''
-    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, steepness=15, uniform=0):
+    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, goggles=False, steepness=15, uniform=0):
         # Initialize the underlying Gridworld MDP
-        super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, randomize=randomize, prob=prob)
+        super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, goggles=goggles, randomize=randomize, prob=prob)
         # Initialize all the POMDP specific variables
         self.steepness = steepness
         self.uniform = uniform
@@ -234,15 +250,17 @@ class GridworldPOMDPEnv(GridworldEnv):
                 observation_matrix[s, :] = prob_oth
                 observation_matrix[s, s] = prob
         else:
-            for s_i in self.observation_range:
-                for s in self.observation_range:
+            for s_i in range(self.n_states):
+                for s in range(self.n_states):
                     # Calculate the distance between the observed position and the true state
                     distance = np.linalg.norm(np.array(self.index_to_state(s_i)) - np.array(self.index_to_state(s)))
                     # Assign probability based on Gaussian distribution with adjusted steepness
                     observation_matrix[s_i][s] += np.exp(-self.steepness * distance**2 / (2 * variance))
                 # Normalize the probabilities for each row
                 observation_matrix[s_i] /= np.sum(observation_matrix[s_i])
-
+        # Goggles variables
+        if self.goggles == True:
+            observation_matrix[int(self.observation_space.n/2):, int(self.observation_space.n/2):] = np.eye(int(self.observation_space.n/2))
         # Return the built matrix
         return observation_matrix
 
@@ -251,11 +269,6 @@ class GridworldPOMDPEnv(GridworldEnv):
         super().reset()
         info = self._get_info()
         return self.state_to_index(self.current_pos), info
-        '''
-        # Set the initial belief and give it to the agent
-        initial_belief = self.observation_matrix[self.state_to_index(self.current_pos)]
-        return initial_belief
-        '''
 
     def step(self, action):
         # Save the true state
@@ -270,16 +283,16 @@ class GridworldPOMDPEnv(GridworldEnv):
         return obs, reward, done, False, true_state
     
     def _get_info(self):
-        return {"true_state": self.current_pos}
+        return {"true_state": self.current_pos - self.n_states * self.goggles_on}
 
 class GridworldPOMDPEnvGoalless(GridworldEnvGoalless):
     '''
     This extension of the environment work functionally like the previous, but it removes the ending goal state.
     In the POMDP case it also adds the observation mechanism.
     '''
-    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, steepness=15, uniform=0):
+    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, goggles=False, steepness=15, uniform=0):
         # Initialize the underlying Gridworld MDP
-        super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, prob=prob, randomize=randomize)
+        super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, goggles=goggles, prob=prob, randomize=randomize)
         # Initialize all the POMDP specific variables
         self.steepness = steepness
         self.uniform = uniform
@@ -305,15 +318,17 @@ class GridworldPOMDPEnvGoalless(GridworldEnvGoalless):
                 observation_matrix[s, :] = prob_oth
                 observation_matrix[s, s] = prob
         else:
-            for s_i in self.observation_range:
-                for s in self.observation_range:
+            for s_i in range(self.n_states):
+                for s in range(self.n_states):
                     # Calculate the distance between the observed position and the true state
                     distance = np.linalg.norm(np.array(self.index_to_state(s_i)) - np.array(self.index_to_state(s)))
                     # Assign probability based on Gaussian distribution with adjusted steepness
                     observation_matrix[s_i][s] += np.exp(-self.steepness * distance**2 / (2 * variance))
                 # Normalize the probabilities for each row
                 observation_matrix[s_i] /= np.sum(observation_matrix[s_i])
-
+        # Goggles variables
+        if self.goggles == True:
+            observation_matrix[self.n_states:, self.n_states:] = np.eye(self.n_states)
         # Return the built matrix
         return observation_matrix
 
@@ -322,11 +337,6 @@ class GridworldPOMDPEnvGoalless(GridworldEnvGoalless):
         super().reset()
         info = self._get_info()
         return self.state_to_index(self.current_pos), info
-        '''
-        # Set the initial belief and give it to the agent
-        initial_belief = self.observation_matrix[self.state_to_index(self.current_pos)]
-        return initial_belief
-        '''
 
     def step(self, action):
         # Save the true state
@@ -341,7 +351,7 @@ class GridworldPOMDPEnvGoalless(GridworldEnvGoalless):
         return obs, reward, done, False, true_state
     
     def _get_info(self):
-        return {"true_state": self.state_to_index(self.current_pos)}
+        return {"true_state": self.state_to_index(self.current_pos) - self.n_states * self.goggles_on}
 
 
 ## BiModal ##
@@ -362,9 +372,9 @@ class GridworldPOMDPEnvBiModal(GridworldEnvGoalless):
        1-uniform
      - shift_amount: a number that represents how much to shift the gaussian from the mean.
     '''
-    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, steepness=15, uniform=0, shift_amount=0.80):
+    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, goggles=False, steepness=15, uniform=0, shift_amount=0.80):
         # Initialize the underlying Gridworld MDP
-        super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, randomize=randomize, prob=prob)
+        super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, goggles=goggles, randomize=randomize, prob=prob)
         # Initialize all the POMDP specific variables
         self.shift_amount = shift_amount
         self.steepness = steepness
@@ -443,9 +453,9 @@ class GridworldPOMDPEnvAsymm(GridworldEnvGoalless):
        1-uniform
      - shift_amount: a number that represents how much to shift the gaussian from the mean.
     '''
-    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, steepness=15, uniform=0, shift_amount=0.1):
+    def __init__(self, grid_size=5, time_horizon=-1, prob=0.1, randomize=0, length_corridor=0, goggles=False, steepness=15, uniform=0, shift_amount=0.1):
         # Initialize the underlying Gridworld MDP
-        super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, randomize=randomize, prob=prob)
+        super().__init__(grid_size=grid_size, time_horizon=time_horizon, length_corridor=length_corridor, goggles=goggles, randomize=randomize, prob=prob)
         # Initialize all the POMDP specific variables
         self.shift_amount = shift_amount
         self.observation_space = spaces.Discrete(self.grid_size ** 2 + self.length_corridor)

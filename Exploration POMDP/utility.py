@@ -5,18 +5,23 @@ from scipy.stats import t
 
 keys = ['Total Reward', 'Believed Entropy', 'Learned Entropy']
 
-def print_gridworld_with_policy(agent, env, figsize=(6, 6), title="notitle", ax=None):
+def print_gridworld_with_policy(policy_params, env, figsize=(6, 6), title="notitle", ax=None):
     if ax is None:
         fig, ax = plt.subplots(figsize=figsize)
 
-    for state in range(env.observation_space.n):
+    if env.goggles:
+        n_states = int(env.observation_space.n/2)
+    else:
+        n_states = env.observation_space.n
+
+    for state in range(n_states):
         col, row = env.index_to_state(state)
         
         ax.add_patch(
             plt.Rectangle((col, env.grid_size - row - 1), 1, 1, facecolor='white', edgecolor='black'))
 
         for a in range(env.action_space.n):
-            prob = np.exp(agent.policy_params[state, a]) / np.sum(np.exp(agent.policy_params[state]))
+            prob = np.exp(policy_params[state, a]) / np.sum(np.exp(policy_params[state]))
             # Calculate the center coordinates of the state cell
             center_x = col + 0.5
             center_y = env.grid_size - row - 0.5
@@ -69,7 +74,7 @@ def print_heatmap(agent, d_t, title, ax=None):
     else:
         heatmap_data = np.full((agent.env.grid_size, agent.env.grid_size), np.nan)
     # Prepare data for plotting
-    for index in range(agent.env.observation_space.n):
+    for index in range(d_t.size):
         col, row = agent.env.index_to_state(index)
         heatmap_data[row][col] = d_t[index]
     # Plot the heatmap
