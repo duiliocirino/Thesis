@@ -1,10 +1,10 @@
 import numpy as np
 import random
 import matplotlib.pyplot as plt
-from scipy.stats import t, entropy
+from scipy.stats import t, entropy, mode
 import multiprocessing
 
-from utility import print_gridworld_with_policy, print_heatmap, plot_graph, mode
+from utility import print_gridworld_with_policy, print_heatmap, plot_graph
 
 ## REWARD MDP ##
 
@@ -49,8 +49,8 @@ class REINFORCEAgent():
         # Get probability vector
         probs = self.get_probability(state)
         # Sample the action
-        action = random.choices(range(len(probs)), weights=probs)[0]
-        #action = np.random.choice(len(probs), p=probs)
+        #action = random.choices(range(len(probs)), weights=probs)[0]
+        action = np.random.choice(len(probs), p=probs)
         return action, probs
 
     def compute_returns(self, trajectory):
@@ -264,7 +264,7 @@ class REINFORCEAgentE(REINFORCEAgent):
         self.policy_params += self.alpha * grad
         return entropy
 
-    def update_multiple_sampling(self, trajectories, baseline_coefficient=1, belief_reg=0):
+    def update_multiple_sampling(self, trajectories, baseline_only=1, belief_reg=0):
         '''
         This version of the update takes into consideration the approximation of the gradient by sampling multiple trajectories. Instead
         of working with only one trajectory it works with multiple trajectories in order to have a more accurate representation of the expected
@@ -273,26 +273,49 @@ class REINFORCEAgentE(REINFORCEAgent):
         Args:
          - trajectories: a list of sampled trajectories from which we compute the policy gradient.
         '''
+        grad = np.zeros_like(self.policy_params)
+        list_grads = []
+        sum_prod = 0
         entropies = []
         belief_entropies = []
-        # Compute all entropies
+        # Compute all entropies and gradients
         for episode, d_t in trajectories:
             step_beliefs = [step[0] for step in episode]
             for belief in step_beliefs:
                 belief_entropies.append(self.compute_entropy(belief))
-            # Handle goggles
+            # Handle goggles by adding the states with and without glasses to be the same state
             if self.env.goggles == True:
                 d_t = d_t[:self.env.n_states] + d_t[self.env.n_states:]
+            # Initialize the gradient of the k-th sampled trajectory
+            grad_k = np.zeros_like(self.policy_params)
+            # Compute the gradient
+            for t in range(len(episode)):
+                state, action, probs, _, _ = episode[t]
+                # Compute the policy gradient
+                dlogp = np.zeros(self.env.action_space.n)
+                for i in range(self.env.action_space.n):
+                    dlogp[i] = 1.0 - probs[i] if i == action else -probs[i]
+                grad_k += np.outer(state, dlogp)
+            # Save the gradient of the trajectory
+            list_grads.append(grad_k)
+            # Sum the k-th gradient to the final gradient
+            grad += grad_k
             entropies.append(self.compute_entropy(d_t))
+        # Calculate the sum of the entropies beliefs
         sum_entropies_belief = (np.sum(belief_entropies) / len(trajectories))
-        # Compute bound
+        # Calculate the bound
         bound = (np.log(self.env.observation_space.n) / np.log(self.env.observation_space.n - 1) * sum_entropies_belief -
                  np.log(self.env.observation_space.n) * np.sqrt(np.log(2 / 0.95) / (2*len(trajectories))))
-        # Entropies with belief regularization
+        # Regularize entropies if needed
         reg_entropies = entropies - belief_reg * bound
-        # Compute baseline as the average entropy
-        baseline = np.mean(entropies) * baseline_coefficient
-        # Update policy parameters using the approximated gradient of the entropy objective function
+        # Compute the numerator of the baseline as in the document
+        sum_prod = np.sum([grad * entropy for grad, entropy in zip(list_grads, reg_entropies)])
+        # Compute baseline
+        baseline = (sum_prod / grad)
+        # baseline = np.mean(entropies) * baseline_coefficient # old baseline with independence assumption
+
+        ## Update policy parameters using the approximated gradient of the entropy objective function
+        
         grad = np.zeros_like(self.policy_params)
         for k, episode in enumerate(trajectories):
             # Initialize the gradient of the k-th sampled trajectory
@@ -301,17 +324,8 @@ class REINFORCEAgentE(REINFORCEAgent):
             entropy = reg_entropies[k]
             # Compute advantage
             advantage = entropy - baseline
-            # Compute the gradient
-            trajectory = episode[0]
-            for t in range(len(trajectory)):
-                state, action, probs, _, _ = trajectory[t]
-                # Compute the policy gradient
-                dlogp = np.zeros(self.env.action_space.n)
-                for i in range(self.env.action_space.n):
-                    dlogp[i] = 1.0 - probs[i] if i == action else -probs[i]
-                grad_k += np.outer(state, dlogp) * advantage
             # Sum the k-th gradient to the final gradient
-            grad += grad_k
+            grad += list_grads[k] * advantage
         # Divide the gradient by the number of trajectories sampled
         grad /= len(trajectories)
         # Update the policy parameters
@@ -446,11 +460,11 @@ class REINFORCEAgentPOMDP(REINFORCEAgent):
         if behaviour != 0 and behaviour != 1:
             raise Exception("You have to pass me 0 or 1, read :/")
         if behaviour == 0:
-            state = random.choices(range(belief.size), weights=belief)[0]
-            #state = np.random.choice(belief.size, p=belief, size=1)
+            #state = random.choices(range(belief.size), weights=belief)[0]
+            state = np.random.choice(belief.size, p=belief, size=1)
         elif behaviour == 1:
-            states = random.choices(range(belief.size), k=self.n_expected_value, weights=belief)
-            #states = np.random.choice(belief.size, p=belief, size=self.n_expected_value)
+            #states = random.choices(range(belief.size), k=self.n_expected_value, weights=belief)
+            states = np.random.choice(belief.size, p=belief, size=self.n_expected_value)
             state = mode(states)[0]
         state = self.env.index_to_state(state)
         return state
@@ -530,16 +544,16 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
         if behaviour != 0 and behaviour != 1:
             raise Exception("You have to pass me 0 or 1, read :/")
         if behaviour == 0:
-            state = random.choices(range(belief.size), weights=belief)[0]
-            #state = np.random.choice(belief.size, p=belief, size=1)
+            #state = random.choices(range(belief.size), weights=belief)[0]
+            state = np.random.choice(belief.size, p=belief, size=1)
         elif behaviour == 1:
-            states = random.choices(range(belief.size), k=self.n_expected_value, weights=belief)
-            #states = np.random.choice(belief.size, p=belief, size=self.n_expected_value)
+            #states = random.choices(range(belief.size), k=self.n_expected_value, weights=belief)
+            states = np.random.choice(belief.size, p=belief, size=self.n_expected_value)
             state = mode(states)[0]
         state = self.env.index_to_state(state)
         return state
 
-    def play(self, env, n_traj):
+    def play(self, env, n_traj, seed=None, printing=False):
         # Initialize episodes array
         episodes = []
         true_entropies = []
@@ -551,20 +565,15 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
             true_d_t = np.zeros(env.observation_space.n)
             # Initialize the belief states
             self.belief_state = np.zeros(env.observation_space.n)
-            if env.goggles == True:
-                belief = np.ones(env.n_states) / env.n_states
-                self.belief_state = np.concatenate((belief, self.belief_state[belief.size:]))
-            else:
-                self.belief_state = np.ones(env.observation_space.n) / env.observation_space.n
+            self.belief_state = np.ones(env.observation_space.n) / env.observation_space.n
             # Reset the environment
-            env.reset()
-            goggles = False
+            env.reset(seed=seed)
             done = False
             while not done:
                 # Sample action and get probabilities from the belief
                 action, probs = self.get_action(self.belief_state)
                 # Sample state
-                sampled_state = self.get_state(self.belief_state, 1)
+                sampled_state = self.get_state(self.belief_state, 0)
                 # Get the index of the state
                 state_index = self.env.state_to_index(sampled_state)
                 # Take a step of the environment
@@ -586,7 +595,7 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
             episodes.append((episode, d_t))
         return episodes, true_entropies
 
-    def print_visuals(self, env, n_traj):
+    def print_visuals(self, env, n_traj, seed=None):
         # Visualization of policy and expected state visitation
         d_t = np.zeros(env.observation_space.n)
         true_d_t = np.zeros(env.observation_space.n)
@@ -594,13 +603,14 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
             # Initialize the belief states
             self.belief_state = np.ones(env.observation_space.n) / env.observation_space.n
             # Reset the environment
-            env.reset()
+            env.reset(seed=seed)
+            iter=0
             done = False
             while not done:
                 # Sample action and get probabilities from the belief
                 action, _ = self.get_action(self.belief_state)
                 # Sample state
-                sampled_state = self.get_state(self.belief_state, 1)
+                sampled_state = self.get_state(self.belief_state, 0)
                 # Get the index of the state
                 state_index = self.env.state_to_index(sampled_state)
                 # Take a step of the environment
@@ -612,6 +622,7 @@ class REINFORCEAgentEPOMDP(REINFORCEAgentE):
                 # Update state visitation
                 true_d_t[true_state_index] += 1
                 self.belief_update(action, next_obs)
+                iter+=1
         # Normalize the state visitations
         true_d_t /= (env.time_horizon * n_traj)
         d_t /= (env.time_horizon * n_traj)

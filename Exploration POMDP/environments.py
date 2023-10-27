@@ -131,8 +131,8 @@ class GridworldEnv(gym.Env):
     def sample_next_state(self, action):
         current_state = self.state_to_index(self.current_pos)
         action_probabilities = self.transition_matrix[:, current_state, action]
-        next_state_index = random.choices(self.observation_range, weights=action_probabilities)[0]
-        #next_state_index = np.random.choice(self.observation_space.n, p=action_probabilities)
+        #next_state_index = random.choices(self.observation_range, weights=action_probabilities)[0]
+        next_state_index = np.random.choice(self.observation_space.n, p=action_probabilities)
         next_pos = self.index_to_state(next_state_index)
         # TODO: This could generate problems with a small environment
         if self.goggles and next_pos[1] > self.grid_size + self.length_corridor:
@@ -159,6 +159,9 @@ class GridworldEnv(gym.Env):
         return self.state_to_index(self.current_pos), reward, self.done, False, info
     
     def reset(self, seed=None, options=None):
+        # We need the following line to seed self.np_random
+        super().reset(seed=seed)
+        np.random.seed(seed=seed)
         if self.randomize == 1:
             self.current_pos = self.index_to_state(np.random.randint(0, self.observation_space.n))
         else:
@@ -245,10 +248,12 @@ class GridworldPOMDPEnv(GridworldEnv):
         if self.uniform > 0:
             prob = 1 - self.uniform
             prob_oth = self.uniform / (self.observation_space.n - 1)
-            for s in self.observation_range:
-                # Assign probability based on Gaussian distribution with adjusted steepness
-                observation_matrix[s, :] = prob_oth
-                observation_matrix[s, s] = prob
+            for s in range(self.n_states):
+                if self.goggles and self.index_to_state == self.goggles_pos:
+                    observation_matrix[s, s] = 1
+                else:
+                    observation_matrix[s, :] = prob_oth
+                    observation_matrix[s, s] = prob
         else:
             for s_i in range(self.n_states):
                 for s in range(self.n_states):
@@ -278,8 +283,8 @@ class GridworldPOMDPEnv(GridworldEnv):
         # Get the observation probabilities for the state
         obs_prob = self.observation_matrix[next_state]
         # Sample the next observation from the probabilities
-        obs = random.choices(self.observation_range, weights=obs_prob)[0]
-        #obs = np.random.choice(self.grid_size**2, p=obs_prob)
+        #obs = random.choices(self.observation_range, weights=obs_prob)[0]
+        obs = np.random.choice(self.observation_space.n, p=obs_prob)
         return obs, reward, done, False, true_state
     
     def _get_info(self):
@@ -313,10 +318,12 @@ class GridworldPOMDPEnvGoalless(GridworldEnvGoalless):
         if self.uniform > 0:
             prob = 1 - self.uniform
             prob_oth = self.uniform / (self.observation_space.n - 1)
-            for s in self.observation_range:
-                # Assign probability based on Gaussian distribution with adjusted steepness
-                observation_matrix[s, :] = prob_oth
-                observation_matrix[s, s] = prob
+            for s in range(self.n_states):
+                if self.goggles and self.index_to_state == self.goggles_pos:
+                    observation_matrix[s, s] = 1
+                else:
+                    observation_matrix[s, :] = prob_oth
+                    observation_matrix[s, s] = prob
         else:
             for s_i in range(self.n_states):
                 for s in range(self.n_states):
@@ -346,8 +353,8 @@ class GridworldPOMDPEnvGoalless(GridworldEnvGoalless):
         # Get the observation probabilities for the state
         obs_prob = self.observation_matrix[next_state]
         # Sample the next observation from the probabilities
-        obs = random.choices(self.observation_range, weights=obs_prob)[0]
-        #obs = np.random.choice(self.grid_size**2, p=obs_prob)
+        #obs = random.choices(self.observation_range, weights=obs_prob)[0]
+        obs = np.random.choice(self.observation_space.n, p=obs_prob)
         return obs, reward, done, False, true_state
     
     def _get_info(self):
@@ -431,8 +438,8 @@ class GridworldPOMDPEnvBiModal(GridworldEnvGoalless):
         # Get the observation probabilities for the state
         obs_prob = self.observation_matrix[next_state]
         # Sample the next observation from the probabilities
-        obs = random.choices(self.observation_range, weights=obs_prob)[0]
-        #obs = np.random.choice(self.grid_size**2, p=obs_prob)
+        #obs = random.choices(self.observation_range, weights=obs_prob)[0]
+        obs = np.random.choice(self.observation_space.n, p=obs_prob)
         return obs, reward, done, False, true_state
     
     def _get_info(self):
@@ -517,8 +524,8 @@ class GridworldPOMDPEnvAsymm(GridworldEnvGoalless):
         # Get the observation probabilities for the state
         obs_prob = self.observation_matrix[next_state]
         # Sample the next observation from the probabilities
-        obs = random.choices(self.observation_range, weights=obs_prob)[0]
-        #obs = np.random.choice(self.grid_size**2, p=obs_prob)
+        #obs = random.choices(self.observation_range, weights=obs_prob)[0]
+        obs = np.random.choice(self.observation_space.n, p=obs_prob)
         return obs, reward, done, False, true_state
     
     def _get_info(self):
